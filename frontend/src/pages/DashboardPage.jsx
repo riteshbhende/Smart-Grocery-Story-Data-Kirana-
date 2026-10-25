@@ -1,0 +1,789 @@
+import { useEffect, useState } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { LayoutDashboard, ShoppingCart, AlertTriangle, Package, Lightbulb, Clock } from 'lucide-react'
+import { getApiErrorMessage } from '../api/client'
+import Button from '../components/ui/Button'
+import { SkeletonCard } from '../components/ui/Skeleton'
+import SmartInsightCard from '../components/ui/SmartInsightCard'
+import { useToast } from '../components/ui/toast'
+import {
+  acknowledgeExpiryAlert,
+  getExpiryAlerts,
+  getGroceries,
+  getLowStock,
+  getRecommendations,
+  getSellerProducts,
+  getSummary,
+} from '../services/groceryService'
+import { buildDashboardSmartInsights, findSellerMatchesForItem } from '../utils/smartSuggestions'
+import { getFallbackImage, resolveImageUrl } from '../utils/imageFallback'
+
+const t = (text) => text
+
+const getSummaryValue = (summary, key) => {
+  if (!summary) return '--'
+  if (key === 'pendingItems') return summary.pendingItems
+  if (key === 'lowStockItems') return summary.lowStockItems
+  if (key === 'purchasedItems') return summary.purchasedItems
+  if (key === 'totalItems') return summary.totalItems
+  return '--'
+}
+
+const summaryCards = [
+  { key: 'totalItems', label: 'Total Items', accent: 'from-sky-500 to-cyan-400', icon: Package },
+  { key: 'pendingItems', label: 'Pending', accent: 'from-amber-500 to-orange-400', icon: Clock },
+  { key: 'purchasedItems', label: 'Purchased', accent: 'from-emerald-500 to-lime-400', icon: ShoppingCart },
+  { key: 'lowStockItems', label: 'Low Stock', accent: 'from-rose-500 to-pink-400', icon: AlertTriangle },
+]
+
+function DashboardPage() {
+  const toast = useToast()
+  const location = useLocation()
+  const navigate = useNavigate()
+  const [summary, setSummary] = useState(null)
+  const [recommendations, setRecommendations] = useState([])
+  const [lowStockItems, setLowStockItems] = useState([])
+  const [sellerProducts, setSellerProducts] = useState([])
+  const [expiryAlerts, setExpiryAlerts] = useState([])
+  const [myItems, setMyItems] = useState([])
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [activeSection, setActiveSection] = useState('')
+  const [acknowledgingItemId, setAcknowledgingItemId] = useState('')
+
+  const dashboardSections = [
+    { key: 'recommendations', label: 'Smart Picks', sublabel: 'Recommendation queue', icon: Lightbulb },
+    { key: 'low-stock-watchlist', label: 'Action Board', sublabel: 'Low-stock watchlist', icon: AlertTriangle },
+    { key: 'kitchen-reminders', label: 'Kitchen Reminder', sublabel: 'Expiry reminders', icon: Clock },
+    { key: 'pending-focus', label: 'Pending Focus', sublabel: 'Items that still need action', icon: Package },
+    { key: 'recent-list', label: 'Recent List', sublabel: 'Latest grocery activity', icon: ShoppingCart },
+  ]
+
+  const formatExpiryDate = (value) => {
+    if (!value) {
+      return ''
+    }
+
+    return new Date(`${value}T00:00:00`).toLocaleDateString()
+  }
+
+  const findSellerMatches = (item) => {
+    const itemName = (item.name || '').trim().toLowerCase()
+    const itemCategory = (item.category || '').trim().toLowerCase()
+
+    return findSellerMatchesForItem({ ...item, name: itemName, category: itemCategory }, sellerProducts).slice(0, 3)
+  }
+
+  const fetchDashboardData = async () => {
+    const results = await Promise.allSettled([
+      getSummary(),
+      getRecommendations(),
+      getLowStock(),
+      getExpiryAlerts(),
+      getGroceries(),
+      getSellerProducts(),
+    ])
+
+    const [
+      summaryResult,
+      recommendationsResult,
+      lowStockResult,
+      expiryAlertsResult,
+      myItemsResult,
+      sellerProductsResult,
+    ] = results
+    const failures = results.filter((result) => result.status === 'rejected')
+
+      return {
+        failures,
+        summary: summaryResult.status === 'fulfilled' ? summaryResult.value : undefined,
+        recommendations:
+          recommendationsResult.status === 'fulfilled' ? recommendationsResult.value : undefined,
+        lowStockItems: lowStockResult.status === 'fulfilled' ? lowStockResult.value : undefined,
+        expiryAlerts: expiryAlertsResult.status === 'fulfilled' ? expiryAlertsResult.value : undefined,
+        myItems: myItemsResult.status === 'fulfilled' ? myItemsResult.value : undefined,
+        sellerProducts:
+          sellerProductsResult.status === 'fulfilled' ? sellerProductsResult.value : undefined,
+      }
+  }
+
+  const applyDashboardData = (data) => {
+    if (data.summary !== undefined) {
+      setSummary(data.summary)
+    }
+
+    if (data.recommendations !== undefined) {
+      setRecommendations(data.recommendations)
+    }
+
+    if (data.lowStockItems !== undefined) {
+      setLowStockItems(data.lowStockItems)
+    }
+
+    if (data.expiryAlerts !== undefined) {
+      setExpiryAlerts(data.expiryAlerts)
+    }
+
+    if (data.myItems !== undefined) {
+      setMyItems(data.myItems)
+    }
+
+    if (data.sellerProducts !== undefined) {
+      setSellerProducts(data.sellerProducts)
+    }
+  }
+
+  const setDashboardErrorFromFailures = (failures) => {
+    if (failures.length === 0) {
+      setError('')
+      return
+    }
+
+    if (failures.length === 5) {
+      setError(
+        getApiErrorMessage(
+          failures[0].reason,
+          'Unable to load dashboard data. Start the backend and login again.',
+        ),
+      )
+      return
+    }
+
+    setError('Some dashboard sections are temporarily unavailable.')
+  }
+
+  useEffect(() => {
+    let cancelled = false
+
+    fetchDashboardData().then((data) => {
+      if (cancelled) {
+        return
+      }
+
+      applyDashboardData(data)
+      setDashboardErrorFromFailures(data.failures)
+      setLoading(false)
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    const sectionToOpen = location.state?.openSection
+
+    if (!sectionToOpen) {
+      return
+    }
+
+    setActiveSection(sectionToOpen)
+    navigate(location.pathname, { replace: true, state: {} })
+  }, [location.pathname, location.state, navigate])
+
+  useEffect(() => {
+    let cancelled = false
+
+    const handleDataChanged = async () => {
+      const results = await Promise.allSettled([
+        getSummary(),
+        getRecommendations(),
+          getLowStock(),
+          getExpiryAlerts(),
+          getGroceries(),
+          getSellerProducts(),
+        ])
+
+      if (cancelled) {
+        return
+      }
+
+      const [
+        summaryResult,
+        recommendationsResult,
+        lowStockResult,
+        expiryAlertsResult,
+        myItemsResult,
+        sellerProductsResult,
+      ] = results
+      const failures = results.filter((result) => result.status === 'rejected')
+
+      if (summaryResult.status === 'fulfilled') {
+        setSummary(summaryResult.value)
+      }
+
+      if (recommendationsResult.status === 'fulfilled') {
+        setRecommendations(recommendationsResult.value)
+      }
+
+      if (lowStockResult.status === 'fulfilled') {
+        setLowStockItems(lowStockResult.value)
+      }
+
+      if (expiryAlertsResult.status === 'fulfilled') {
+        setExpiryAlerts(expiryAlertsResult.value)
+      }
+
+      if (myItemsResult.status === 'fulfilled') {
+        setMyItems(myItemsResult.value)
+      }
+
+      if (sellerProductsResult.status === 'fulfilled') {
+        setSellerProducts(sellerProductsResult.value)
+      }
+
+      if (failures.length === 0) {
+        setError('')
+        return
+      }
+
+      if (failures.length === results.length) {
+        setError(
+          getApiErrorMessage(
+            failures[0].reason,
+            'Unable to load dashboard data. Start the backend and login again.',
+          ),
+        )
+        return
+      }
+
+      setError('Some dashboard sections are temporarily unavailable.')
+    }
+
+    window.addEventListener('grocery-data-changed', handleDataChanged)
+
+    return () => {
+      cancelled = true
+      window.removeEventListener('grocery-data-changed', handleDataChanged)
+    }
+  }, [])
+ 
+  const recentItems = [...myItems]
+    .sort((first, second) => {
+      if (first.lastPurchasedAt && second.lastPurchasedAt) {
+        return new Date(second.lastPurchasedAt) - new Date(first.lastPurchasedAt)
+      }
+
+      if (second.lastPurchasedAt) {
+        return 1
+      }
+
+      if (first.lastPurchasedAt) {
+        return -1
+      }
+
+      return second.id - first.id
+    })
+    .slice(0, 5)
+  const pendingItems = myItems.filter((item) => !item.purchased).slice(0, 5)
+  const dashboardSmartInsights = buildDashboardSmartInsights({
+    recommendations,
+    lowStockItems,
+    expiryAlerts,
+    sellerProducts,
+    myItems,
+  })
+
+  const refreshDashboard = async () => {
+    const data = await fetchDashboardData()
+    applyDashboardData(data)
+    setDashboardErrorFromFailures(data.failures)
+  }
+
+  const handleAcknowledgeAlert = async (itemId) => {
+    setAcknowledgingItemId(itemId)
+    setError('')
+
+    try {
+      await acknowledgeExpiryAlert(itemId)
+      await refreshDashboard()
+      window.dispatchEvent(new Event('grocery-data-changed'))
+      toast.success('Expiry reminder deleted.')
+    } catch (requestError) {
+      setError(getApiErrorMessage(requestError, 'Could not delete this kitchen reminder.'))
+      toast.error('Could not delete this reminder.')
+    } finally {
+      setAcknowledgingItemId('')
+    }
+  }
+
+  const renderActiveSection = () => {
+    if (activeSection === 'recommendations') {
+      return (
+        <section className="grid gap-6">
+          <article className="rounded-[32px] border border-white/60 bg-white/80 p-6 shadow-[0_15px_50px_rgba(15,23,42,0.08)]">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="rounded-full bg-slate-100 px-4 py-2 text-sm font-medium text-slate-600">
+                {recommendations.length} suggestions
+              </div>
+            </div>
+
+            <div className="mt-6 space-y-4">
+              {recommendations.length === 0 && (
+                <p className="rounded-3xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500">
+                  {t('No recommendations yet. Add and update groceries to generate insights.')}
+                </p>
+              )}
+
+              {recommendations.map((item) => (
+                <div
+                  key={`${item.itemName}-${item.category}`}
+                  className="rounded-3xl border border-slate-100 bg-slate-50 px-5 py-4"
+                >
+                  <div className="flex items-center gap-4">
+                    <img
+                      src={getFallbackImage(item.itemName, item.category)}
+                      alt={item.itemName}
+                      className="h-12 w-12 rounded-xl object-cover bg-white/60 border border-slate-200/50 shadow-sm"
+                      style={{ mixBlendMode: 'multiply' }}
+                      onError={(e) => {
+                        e.target.onerror = null
+                        e.target.src = getFallbackImage(item.itemName, item.category)
+                      }}
+                    />
+                    <div className="flex-1">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <p className="text-lg font-semibold text-slate-900">{item.itemName}</p>
+                          <p className="text-sm text-slate-500">{item.category}</p>
+                        </div>
+                        <span className="rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold tracking-[0.2em] text-white">
+                          {item.priority}
+                        </span>
+                      </div>
+                      <p className="mt-2 text-sm text-slate-600">{item.reason}</p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </article>
+        </section>
+      )
+    }
+
+    if (activeSection === 'low-stock-watchlist') {
+      return (
+        <section className="grid gap-6">
+          <article className="rounded-[32px] border border-white/60 bg-slate-950 p-6 text-white shadow-[0_15px_50px_rgba(15,23,42,0.18)]">
+            <div className="mt-6 space-y-4">
+              {lowStockItems.length === 0 && (
+                <p className="rounded-3xl border border-white/10 bg-white/5 px-4 py-6 text-sm text-slate-300">
+                  {t('No urgent restock items right now.')}
+                </p>
+              )}
+
+              {lowStockItems.map((item) => {
+                const matches = findSellerMatches(item)
+
+                return (
+                  <div
+                    key={item.id}
+                    className="rounded-3xl border border-white/10 bg-white/5 px-5 py-4"
+                  >
+                    <div className="flex items-center gap-4">
+                      <img
+                        src={resolveImageUrl(item.imageUrl, item.name, item.category)}
+                        alt={item.name}
+                        className="h-12 w-12 rounded-xl object-cover bg-white/10 border border-white/10 shadow-sm"
+                        style={{ mixBlendMode: 'multiply' }}
+                        onError={(e) => {
+                          e.target.onerror = null
+                          e.target.src = getFallbackImage(item.name, item.category)
+                        }}
+                      />
+                      <div className="flex-1">
+                        <div className="flex items-center justify-between gap-4">
+                          <div>
+                            <p className="text-lg font-semibold">{item.name}</p>
+                            <p className="text-sm text-slate-300">{item.category}</p>
+                          </div>
+                          <div className="rounded-full border border-amber-300/40 bg-amber-300/10 px-3 py-1 text-sm font-semibold text-amber-200">
+                            {t('Qty')} {item.quantity}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 rounded-2xl border border-emerald-300/20 bg-emerald-300/10 px-4 py-3">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <p className="text-sm font-semibold text-emerald-200">
+                            {t('Seller match suggestions')}
+                          </p>
+                          <p className="mt-1 text-xs text-slate-300">
+                            {t('Smart matching found live seller products for this low-stock item.')}
+                          </p>
+                        </div>
+                        <Link
+                          to="/home"
+                          className="rounded-full border border-emerald-300/40 bg-emerald-300/10 px-3 py-1 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-300/20"
+                        >
+                          {t('Open Marketplace')}
+                        </Link>
+                      </div>
+
+                      <div className="mt-3 grid gap-2">
+                        {matches.length === 0 && (
+                          <p className="text-sm text-slate-300">
+                            {t('No matching seller product is available right now.')}
+                          </p>
+                        )}
+
+                        {matches.map((product) => (
+                          <div
+                            key={`${item.id}-${product.id}`}
+                            className="flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-white/10 px-3 py-2 text-sm"
+                          >
+                            <span className="font-semibold text-white">{product.name}</span>
+                            <span className="text-slate-300">
+                              {t('Rs')} {product.price} | {product.stock} {t('stock')}
+                              {product.expiryDate ? ` | ${t('Expires')} ${formatExpiryDate(product.expiryDate)}` : ''}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </article>
+        </section>
+      )
+    }
+
+    if (activeSection === 'pending-focus') {
+      return (
+        <section className="grid gap-6">
+          <article className="rounded-[32px] border border-white/60 bg-white/80 p-6 shadow-[0_15px_50px_rgba(15,23,42,0.08)]">
+            <div className="mt-6 space-y-4">
+              {pendingItems.length === 0 && (
+                <p className="rounded-3xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500">
+                  {t('No pending items. Your list is fully handled.')}
+                </p>
+              )}
+
+              {pendingItems.map((item) => (
+                <div
+                  key={item.id}
+                  className="rounded-3xl border border-slate-100 bg-slate-50 px-5 py-4"
+                >
+                  <div className="flex items-center gap-4">
+                    <img
+                      src={resolveImageUrl(item.imageUrl, item.name, item.category)}
+                      alt={item.name}
+                      className="h-12 w-12 rounded-xl object-cover bg-white/60 border border-slate-200/50 shadow-sm"
+                      style={{ mixBlendMode: 'multiply' }}
+                      onError={(e) => {
+                        e.target.onerror = null
+                        e.target.src = getFallbackImage(item.name, item.category)
+                      }}
+                    />
+                    <div className="flex-1">
+                      <div className="flex items-center justify-between gap-4">
+                        <div>
+                          <p className="text-lg font-semibold text-slate-900">{item.name}</p>
+                          <p className="text-sm text-slate-500">{item.category}</p>
+                        </div>
+                        <div className="rounded-full bg-white px-3 py-1 text-sm font-semibold text-slate-700">
+                          {t('Qty')} {item.quantity}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </article>
+        </section>
+      )
+    }
+
+    if (activeSection === 'kitchen-reminders') {
+      return (
+        <section className="grid gap-6">
+          <article className="rounded-[32px] border border-white/60 bg-white/80 p-6 shadow-[0_15px_50px_rgba(15,23,42,0.08)]">
+            <div className="flex items-center justify-between gap-3">
+              <div className="rounded-full bg-amber-100 px-4 py-2 text-sm font-medium text-amber-800">
+                {expiryAlerts.length} active alerts
+              </div>
+            </div>
+
+            <div className="mt-6 grid gap-4">
+              {expiryAlerts.length === 0 && (
+                <p className="rounded-3xl border border-dashed border-amber-200 bg-amber-50 px-4 py-6 text-sm text-amber-800">
+                  {t('No expiry reminders right now.')}
+                </p>
+              )}
+
+              {expiryAlerts.map((alert) => (
+                <article
+                  key={alert.itemId}
+                  className="rounded-3xl border border-amber-200 bg-amber-50 px-5 py-4"
+                >
+                  <div className="flex items-center gap-4">
+                    <img
+                      src={getFallbackImage(alert.itemName, alert.category)}
+                      alt={alert.itemName}
+                      className="h-12 w-12 rounded-xl object-cover bg-white/60 border border-amber-200/50 shadow-sm"
+                      style={{ mixBlendMode: 'multiply' }}
+                      onError={(e) => {
+                        e.target.onerror = null
+                        e.target.src = getFallbackImage(alert.itemName, alert.category)
+                      }}
+                    />
+                    <div className="flex-1">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <p className="text-lg font-semibold text-slate-900">{alert.itemName}</p>
+                          <p className="text-sm text-slate-500">
+                            {alert.category} | Expires {formatExpiryDate(alert.expiryDate)}
+                          </p>
+                        </div>
+                        <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold tracking-[0.2em] text-amber-800">
+                          {alert.severity}
+                        </span>
+                      </div>
+                      <p className="mt-2 text-sm text-slate-700">{alert.message}</p>
+                      <Button
+                        type="button"
+                        onClick={() => handleAcknowledgeAlert(alert.itemId)}
+                        disabled={acknowledgingItemId === alert.itemId}
+                        variant="secondary"
+                        className="mt-4 border-amber-300 text-amber-900 hover:bg-amber-100"
+                      >
+                        {acknowledgingItemId === alert.itemId ? 'Deleting...' : 'Delete Reminder'}
+                      </Button>
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </article>
+        </section>
+      )
+    }
+
+    return (
+      <section className="grid gap-6">
+        <article className="rounded-[32px] border border-white/60 bg-white/80 p-6 shadow-[0_15px_50px_rgba(15,23,42,0.08)]">
+          <div className="mt-6 space-y-4">
+            {recentItems.length === 0 && (
+              <p className="rounded-3xl border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500">
+                {t('No grocery activity yet.')}
+              </p>
+            )}
+
+            {recentItems.map((item) => (
+              <div
+                key={item.id}
+                className="rounded-3xl border border-slate-100 bg-slate-50 px-5 py-4"
+              >
+                <div className="flex items-center gap-4">
+                  <img
+                    src={resolveImageUrl(item.imageUrl, item.name, item.category)}
+                    alt={item.name}
+                    className="h-12 w-12 rounded-xl object-cover bg-white/60 border border-slate-200/50 shadow-sm"
+                    style={{ mixBlendMode: 'multiply' }}
+                    onError={(e) => {
+                      e.target.onerror = null
+                      e.target.src = getFallbackImage(item.name, item.category)
+                    }}
+                  />
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between gap-4">
+                      <div>
+                        <p className="text-lg font-semibold text-slate-900">{item.name}</p>
+                        <p className="text-sm text-slate-500">{item.category}</p>
+                      </div>
+                      <div className="rounded-full bg-white px-3 py-1 text-sm font-semibold text-slate-700">
+                        {item.purchased ? 'Purchased' : 'Pending'}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </article>
+      </section>
+    )
+  }
+
+  return (
+    <div className="space-y-6">
+      {activeSection && (
+        <button
+          type="button"
+          aria-label="Close dashboard overlays"
+          onClick={() => setActiveSection('')}
+          className="fixed inset-0 z-30 bg-slate-950/25"
+        />
+      )}
+
+      <section id="overview" className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+        <article className="overflow-hidden rounded-[32px] border border-sky-100 bg-[linear-gradient(135deg,_rgba(15,23,42,0.96),_rgba(30,41,59,0.92)_55%,_rgba(14,165,233,0.72))] p-6 text-white shadow-[0_20px_80px_rgba(15,23,42,0.18)]">
+          <p className="flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.35em] text-sky-200">
+            <LayoutDashboard size={16} /> Dashboard
+          </p>
+          <h2 className="mt-4 max-w-2xl text-4xl font-semibold tracking-tight">
+            {t('See the grocery list, stock pressure, and next actions in one place.')}
+          </h2>
+          <p className="mt-4 max-w-xl text-sm text-slate-200 sm:text-base">
+            {t('This view is now focused on operational data. Browse and quickly buy items from the Home page, then use this screen for decisions, including reminders for kitchen items that are close to expiring or expire today.')}
+          </p>
+
+          <div className="mt-8 flex flex-wrap gap-3">
+            <Link
+              to="/inventory"
+              className="rounded-full bg-white px-5 py-3 text-sm font-semibold text-slate-900 transition hover:bg-slate-100"
+            >
+              {t('Open Inventory')}
+            </Link>
+            <Link
+              to="/"
+              className="rounded-full border border-white/20 bg-white/10 px-5 py-3 text-sm font-semibold text-white transition hover:bg-white/15"
+            >
+              {t('Back to Home')}
+            </Link>
+          </div>
+        </article>
+
+        <article className="rounded-[32px] border border-white/60 bg-white/80 p-6 shadow-[0_15px_50px_rgba(15,23,42,0.08)]">
+          <p className="text-sm font-semibold uppercase tracking-[0.3em] text-slate-500">
+            {t('Snapshot')}
+          </p>
+          <div className="mt-5 space-y-4">
+            <div className="rounded-3xl bg-amber-50 px-5 py-4">
+              <p className="text-xs uppercase tracking-[0.25em] text-amber-700">{t('Pending Items')}</p>
+              <p className="mt-2 text-3xl font-semibold text-amber-950">
+                {summary ? summary.pendingItems : '--'}
+              </p>
+            </div>
+            <div className="rounded-3xl bg-rose-50 px-5 py-4">
+              <p className="text-xs uppercase tracking-[0.25em] text-rose-700">{t('Low Stock')}</p>
+              <p className="mt-2 text-3xl font-semibold text-rose-950">
+                {summary ? summary.lowStockItems : '--'}
+              </p>
+            </div>
+            <div className="rounded-3xl bg-emerald-50 px-5 py-4">
+              <p className="text-xs uppercase tracking-[0.25em] text-emerald-700">{t('Purchased')}</p>
+              <p className="mt-2 text-3xl font-semibold text-emerald-950">
+                {summary ? summary.purchasedItems : '--'}
+              </p>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        {loading
+          ? Array.from({ length: 4 }).map((_, index) => <SkeletonCard key={index} lines={2} className="bg-white/80" />)
+          : summaryCards.map((card) => (
+              <article
+                key={card.key}
+                className="overflow-hidden rounded-[28px] border border-white/60 bg-white/80 p-5 shadow-[0_15px_50px_rgba(15,23,42,0.08)]"
+              >
+                <div className={`h-2 w-24 rounded-full bg-gradient-to-r ${card.accent}`} />
+                <div className="mt-5 flex items-center gap-2">
+                  <card.icon size={16} className="text-slate-400" />
+                  <p className="text-sm font-medium text-slate-500">{card.label}</p>
+                </div>
+                <p className="mt-3 text-4xl font-semibold tracking-tight text-slate-950">
+                  {getSummaryValue(summary, card.key)}
+                </p>
+              </article>
+            ))}
+      </section>
+
+      {error && (
+        <div className="rounded-[28px] border border-rose-200 bg-rose-50 px-5 py-4 text-sm text-rose-700">
+          {error}
+        </div>
+      )}
+
+      {dashboardSmartInsights.length > 0 && (
+        <section className="rounded-[32px] border border-white/60 bg-white/80 p-6 shadow-[0_15px_50px_rgba(15,23,42,0.08)]">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold uppercase tracking-[0.3em] text-sky-700">
+                {t('Smart Insights')}
+              </p>
+              <h2 className="mt-2 text-2xl font-semibold tracking-tight text-slate-950">
+                {t('Next actions from inventory signals')}
+              </h2>
+            </div>
+            <span className="rounded-full bg-sky-50 px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-sky-700">
+              {dashboardSmartInsights.length} signals
+            </span>
+          </div>
+          <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+            {dashboardSmartInsights.map((insight) => (
+              <SmartInsightCard
+                key={insight.id}
+                title={insight.title}
+                message={insight.message}
+                meta={insight.meta}
+                tone={insight.tone}
+                actionLabel={insight.actionLabel}
+                className={insight.className}
+                onAction={insight.onAction}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {activeSection && (
+        <section className="fixed inset-0 z-40 flex items-center justify-center p-4 sm:p-6">
+          <div
+            className={`relative z-50 w-full max-w-4xl rounded-[36px] p-6 shadow-[0_28px_120px_rgba(15,23,42,0.22)] backdrop-blur sm:p-8 ${
+              activeSection === 'low-stock-watchlist'
+                ? 'border border-slate-800 bg-[linear-gradient(180deg,_rgba(2,6,23,0.98),_rgba(15,23,42,0.96))] text-white'
+                : 'border border-white/70 bg-[linear-gradient(180deg,_rgba(255,255,255,0.97),_rgba(248,250,252,0.95))]'
+            }`}
+          >
+            <div
+              className={`flex flex-wrap items-center justify-between gap-3 pb-4 ${
+                activeSection === 'low-stock-watchlist' ? 'border-b border-white/10' : 'border-b border-slate-200'
+              }`}
+            >
+              <div>
+                <p
+                  className={`text-xs font-semibold uppercase tracking-[0.32em] ${
+                    activeSection === 'low-stock-watchlist' ? 'text-emerald-300' : 'text-sky-700'
+                  }`}
+                >
+                  {dashboardSections.find((section) => section.key === activeSection)?.label}
+                </p>
+                <h2
+                  className={`mt-2 text-2xl font-semibold tracking-tight ${
+                    activeSection === 'low-stock-watchlist' ? 'text-white' : 'text-slate-950'
+                  }`}
+                >
+                  {dashboardSections.find((section) => section.key === activeSection)?.sublabel}
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveSection('')}
+                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
+                  activeSection === 'low-stock-watchlist'
+                    ? 'border border-white/10 bg-white/5 text-white hover:bg-white/10'
+                    : 'border border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50'
+                }`}
+              >
+                {t('Cancel')}
+              </button>
+            </div>
+
+            <div className="mt-6 max-h-[70vh] overflow-y-auto pr-1">{renderActiveSection()}</div>
+          </div>
+        </section>
+      )}
+    </div>
+  )
+}
+
+export default DashboardPage
